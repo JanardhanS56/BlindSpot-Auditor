@@ -117,17 +117,27 @@ class Orchestrator:
                         passed_results.append(result)
                         resolved = True
                     else:
-                        # Re-dispatch with reviewer notes
+                        # Re-dispatch with reviewer notes including cited sources
                         notes_list = [f"Verdict: {verdict.summary}"]
+                        if verdict.references:
+                            notes_list.append(
+                                "Governing Standards & References:\n"
+                                + "\n".join(f"- {ref}" for ref in verdict.references)
+                            )
+
+                        notes_list.append("Specific Issues to Address:")
+                        primary_ref = verdict.references[0] if verdict.references else "project standards"
                         for issue in verdict.issues:
                             loc = f" at {issue.location}" if issue.location else ""
                             sug = f" Suggestion: {issue.suggestion}" if issue.suggestion else ""
-                            notes_list.append(f"- [{issue.severity.upper()}]{loc}: {issue.description}.{sug}")
+                            notes_list.append(
+                                f"- [{issue.severity.upper()}]{loc}: {issue.description} (per {primary_ref}).{sug}"
+                            )
 
                         task.attempt += 1
                         task.reviewer_notes = "\n".join(notes_list)
                         self.logger.info(
-                            "Re-dispatching task %s for attempt %d with reviewer notes",
+                            "Re-dispatching task %s for attempt %d with cited reviewer notes",
                             task.id,
                             task.attempt,
                         )
