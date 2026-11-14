@@ -3,7 +3,7 @@ from typing import Any
 from agents.base import BaseAgent
 from agents.leader import extract_json
 from llm_client import GroqLLMClient
-from models import Issue, Task, TaskResult, Verdict
+from models import Issue, RetrievedChunk, Task, TaskResult, Verdict
 
 logger = logging.getLogger(__name__)
 
@@ -14,14 +14,19 @@ Check for logic errors, edge cases, security issues, hallucinations, and missing
 
 
 class ReviewerAgent(BaseAgent):
-    """Reviewer agent: strictly read-only auditor that outputs structured Verdicts."""
+    """Reviewer agent: strictly read-only auditor that grounds verdicts in retrieved RAG evidence."""
 
-    def __init__(self, llm_client: GroqLLMClient | None = None):
+    def __init__(
+        self,
+        llm_client: GroqLLMClient | None = None,
+        retriever: Any | None = None,
+    ):
         try:
             prompt = self.load_prompt("reviewer_system.md")
         except FileNotFoundError:
             prompt = DEFAULT_REVIEWER_PROMPT
         super().__init__(name="reviewer", system_prompt=prompt, llm_client=llm_client)
+        self.retriever = retriever
 
     async def audit(
         self,
@@ -29,11 +34,25 @@ class ReviewerAgent(BaseAgent):
         result: TaskResult,
         rag_context: list[str] | None = None,
     ) -> Verdict:
-        """Audits task result and returns a structured Verdict.
-
-        Architectural constraint: Read-only. Does not modify input or write state.
-        """
+        """Audits task result and returns a structured Verdict grounded in retrieved evidence."""
         self.logger.info("Auditing result for task %s", task.id)
+
+        retrieved_sources: list[str] = []
+        context_items: list[str] = []
+
+        if rag_context is not None:
+            context_items = rag_context
+        elif self.retriever is not None:
+            # Query retrieval based on task description and requirements
+            review_query = f"{task.description} {' '.join(task.requirements)}"
+            try:
+                chunks: list[RetrievedChunk] = await self.retriever.retrieve(review_query, top_k=3)
+                for idx, c in enumerate(chunks, start=1):
+                    section_info = f" § {c.section}" if c.section else ""
+                    context_items.append(f"[{idx}] (from {c.source_file}{section_info}):\n{c.content}")
+                    retrieved_sources.append(f"{c.source_file}{section_info}")
+            except Exception as ret_err:
+                self.logger.warning("RAG retrieval failed during audit: %s", ret_err)
 
         prompt_parts = [
             f"Assigned Task ID: {task.id}",
@@ -45,12 +64,15 @@ class ReviewerAgent(BaseAgent):
         if result.diff:
             prompt_parts.append(f"Diff from previous iteration:\n```\n{result.diff}\n```")
 
-        if rag_context:
+        if context_items:
             prompt_parts.append(
-                "Retrieved Reference Standards:\n" + "\n".join(f"- {c}" for c in rag_context)
+                "RETRIEVED REFERENCE STANDARDS (from Project Knowledge Base):\n"
+                + "\n\n".join(context_items)
             )
         else:
-            prompt_parts.append("Retrieved Reference Standards: None (Review against general best practices).")
+            prompt_parts.append(
+                "Retrieved Reference Standards: None (Review against general best practices)."
+            )
 
         prompt_parts.append(
             "\nPerform a rigorous, objective audit.\n"
@@ -66,12 +88,14 @@ class ReviewerAgent(BaseAgent):
             '      "suggestion": "Actionable fix suggestion or null"\n'
             "    }\n"
             "  ],\n"
-            '  "references": ["Standards or guidelines consulted"],\n'
+            '  "references": ["Cite specific retrieved standard files or general practices consulted"],\n'
             '  "confidence": 0.95,\n'
             '  "summary": "One-line summary of verdict"\n'
             "}\n"
-            "CRITICAL RULE: If there are ANY critical or major issues, passed MUST be false. "
-            "If only minor or style issues exist, passed MAY be true."
+            "CRITICAL RULES:\n"
+            "1. If there are ANY critical or major issues, passed MUST be false.\n"
+            "2. If only minor or style issues exist, passed MAY be true.\n"
+            "3. In references[], cite the retrieved standards you evaluated against."
         )
 
         user_message = "\n\n".join(prompt_parts)
@@ -103,7 +127,6 @@ class ReviewerAgent(BaseAgent):
                         )
                     )
 
-            # Enforce architectural rule: critical or major issues strictly block PASS
             has_blocking_issues = any(i.severity in ("critical", "major") for i in issues)
             passed = bool(parsed.get("passed", True))
             if has_blocking_issues:
@@ -111,29 +134,38 @@ class ReviewerAgent(BaseAgent):
 
             summary = parsed.get("summary") or ("PASS" if passed else "FAIL - issues detected")
             confidence = float(parsed.get("confidence", 0.9))
-            references = [str(r) for r in parsed.get("references", [])]
+
+            # Combine LLM references with retrieved sources
+            model_refs = [str(r) for r in parsed.get("references", [])]
+            combined_refs = list(dict.fromkeys(model_refs + retrieved_sources))
+            if not combined_refs:
+                combined_refs = ["General software engineering best practices"]
 
             verdict = Verdict(
                 task_id=task.id,
                 passed=passed,
                 issues=issues,
-                references=references,
+                references=combined_refs,
                 confidence=confidence,
                 summary=summary,
             )
         except Exception as e:
             self.logger.error("Failed to parse Reviewer JSON: %s. Response was: %s", e, response_text)
-            # Safe default fallback
             verdict = Verdict(
                 task_id=task.id,
                 passed=True,
                 issues=[],
-                references=["Fallback evaluator"],
+                references=retrieved_sources or ["Fallback evaluator"],
                 confidence=0.5,
                 summary="PASS (fallback parsed output)",
             )
 
-        self.logger.info("Audit complete for %s. Verdict: %s", task.id, "PASS" if verdict.passed else "FAIL")
+        self.logger.info(
+            "Audit complete for %s. Verdict: %s, References: %s",
+            task.id,
+            "PASS" if verdict.passed else "FAIL",
+            verdict.references,
+        )
         return verdict
 
     async def run(self, input_data: Any) -> Any:
