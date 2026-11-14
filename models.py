@@ -37,6 +37,14 @@ class Verdict(BaseModel):
     summary: str
 
 
+class RetrievedChunk(BaseModel):
+    content: str
+    source_file: str
+    chunk_index: int
+    similarity: float
+    section: str | None = None
+
+
 class AgentMessage(BaseModel):
     sender: Literal["leader", "implementer", "reviewer", "orchestrator"]
     recipient: Literal["leader", "implementer", "reviewer", "orchestrator"]
