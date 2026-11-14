@@ -22,7 +22,7 @@ class GroqLLMClient:
         user_message: str,
         model: str | None = None,
         temperature: float = 0.2,
-        max_tokens: int = 4096,
+        max_tokens: int = 800,
     ) -> str:
         target_model = model or self._fallback_model or self.default_model
         messages = [
@@ -31,14 +31,16 @@ class GroqLLMClient:
         ]
 
         attempt = 0
-        backoff = 1.0
+        backoff = 2.0
+        current_max_tokens = max_tokens
+
         while attempt < MAX_RETRIES:
             try:
                 response = await self.client.chat.completions.create(
                     model=target_model,
                     messages=messages,
                     temperature=temperature,
-                    max_tokens=max_tokens,
+                    max_tokens=current_max_tokens,
                 )
                 choice = response.choices[0]
                 content = choice.message.content or ""
@@ -76,12 +78,17 @@ class GroqLLMClient:
                 raise e
             except (RateLimitError, APIConnectionError) as e:
                 attempt += 1
+                # If OTPM limit exceeded, cut max_tokens to fit
+                err_str = str(e)
+                if "output tokens per minute" in err_str or "OTPM" in err_str:
+                    current_max_tokens = min(current_max_tokens, 500)
                 logger.warning(
-                    "Groq API error (%s). Attempt %s/%s. Backing off %ss.",
+                    "Groq API error (%s). Attempt %s/%s. Backing off %ss (max_tokens=%s).",
                     e,
                     attempt,
                     MAX_RETRIES,
                     backoff,
+                    current_max_tokens,
                 )
                 if attempt >= MAX_RETRIES:
                     raise
