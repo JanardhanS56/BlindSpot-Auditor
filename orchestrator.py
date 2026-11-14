@@ -5,6 +5,10 @@ from agents.leader import LeaderAgent
 from agents.reviewer import ReviewerAgent
 from config import MAX_RETRIES
 from models import Task, TaskResult, Verdict
+from rag.embedder import NvidiaEmbedder
+from rag.indexer import KnowledgeBaseIndexer
+from rag.retriever import KnowledgeRetriever
+from rag.setup_db import get_connection, setup_database
 
 logger = logging.getLogger(__name__)
 
@@ -17,19 +21,47 @@ class Orchestrator:
         leader: LeaderAgent | None = None,
         implementer: ImplementerAgent | None = None,
         reviewer: ReviewerAgent | None = None,
+        embedder: NvidiaEmbedder | None = None,
+        retriever: KnowledgeRetriever | None = None,
         max_retries: int = MAX_RETRIES,
     ):
+        self.embedder = embedder or NvidiaEmbedder()
+        self.retriever = retriever or KnowledgeRetriever(embedder=self.embedder)
         self.leader = leader or LeaderAgent()
         self.implementer = implementer or ImplementerAgent()
-        self.reviewer = reviewer or ReviewerAgent()
+        self.reviewer = reviewer or ReviewerAgent(retriever=self.retriever)
         self.max_retries = max_retries
         self.logger = logging.getLogger("orchestrator")
         self.execution_log: list[dict[str, Any]] = []
+
+    async def ensure_indexed(self) -> int:
+        """Ensures the knowledge base is indexed in pgvector on startup."""
+        setup_database()
+        try:
+            conn = get_connection()
+            cur = conn.cursor()
+            cur.execute("SELECT COUNT(*) FROM document_embeddings;")
+            count = cur.fetchone()[0]
+            cur.close()
+            conn.close()
+
+            if count == 0:
+                self.logger.info("document_embeddings table is empty. Ingesting knowledge base...")
+                indexer = KnowledgeBaseIndexer(embedder=self.embedder)
+                indexed_count = await indexer.index_all()
+                return indexed_count
+            return count
+        except Exception as e:
+            self.logger.warning("Could not check or run initial indexing: %s", e)
+            return 0
 
     async def run(self, prompt: str) -> str:
         """Executes the complete AKILI-SPECS workflow for a user prompt."""
         self.logger.info("Starting orchestration for prompt: %s", prompt[:80])
         self.execution_log.clear()
+
+        # Ensure RAG knowledge base is available
+        await self.ensure_indexed()
 
         # Step 1: Leader decomposes the prompt
         tasks: list[Task] = await self.leader.decompose(prompt)
@@ -42,7 +74,7 @@ class Orchestrator:
         passed_results: list[TaskResult] = []
         warnings: list[str] = []
 
-        # Step 2: Process tasks (sequential for Day 1)
+        # Step 2: Process tasks
         for task in tasks:
             self.logger.info("Starting workflow for task %s: %s", task.id, task.description[:60])
             resolved = False
@@ -50,8 +82,8 @@ class Orchestrator:
             while not resolved:
                 # Implementer generates output
                 result: TaskResult = await self.implementer.generate(task)
-                
-                # Reviewer audits output
+
+                # Reviewer audits output (grounded in RAG)
                 verdict: Verdict = await self.reviewer.audit(task, result)
 
                 self.execution_log.append({
@@ -60,6 +92,7 @@ class Orchestrator:
                     "attempt": task.attempt,
                     "passed": verdict.passed,
                     "summary": verdict.summary,
+                    "references": verdict.references,
                 })
 
                 if verdict.passed:
