@@ -1,20 +1,19 @@
 # AKILI-SPECS: BlindSpot Auditor
 
 > **Autonomous Knowledge-Integrated Leader-Implementer Multi-Agent Code Quality System**  
-> *A multi-agent MCP server featuring architectural separation of execution and audit, grounded by pgvector RAG.*
+> A multi-agent MCP server with separate execution and audit roles, grounded by pgvector-based retrieval-augmented generation (RAG).
 
 ---
 
-## 1. System Overview & Core Thesis
+## 1. System Overview
 
-Single-agent LLM systems suffer from an inherent **confirmation bias**: when the same model writes code and is then prompted to "review" it, it routinely approves its own edge-case omissions, hallucinations, and structural bugs.
+Single-agent LLM systems can suffer from confirmation bias: a model that writes code and then reviews its own work may overlook edge cases or approve its own omissions. AKILI-SPECS addresses this by separating planning, implementation, and review:
 
-**AKILI-SPECS** solves this through **strict architectural separation**:
-- **Leader Agent**: Decomposes user prompts into independent sub-tasks, plans execution, and merges finalized outputs. Zero write tools.
-- **Implementer Agent**: Stateless code generator executing sub-tasks concurrently in parallel via `asyncio.gather`.
-- **Reviewer Agent**: **Architecturally read-only** audit agent. It cannot edit code—it can only judge diffs against standards retrieved from a RAG knowledge base. Zero incentive to approve flaws.
+- **Leader Agent**: Decomposes prompts into independent tasks, plans execution, and merges finalized outputs. It has no code-writing tools.
+- **Implementer Agent**: Generates code for assigned tasks and can execute independent work concurrently via `asyncio.gather`.
+- **Reviewer Agent**: Performs read-only audits of changes against standards retrieved from the RAG knowledge base. It cannot edit code.
 
-```
+```text
                            ┌─────────────────────────────────────────┐
                            │          MCP Server (handle_prompt)     │
                            └────────────────────┬────────────────────┘
@@ -22,26 +21,26 @@ Single-agent LLM systems suffer from an inherent **confirmation bias**: when the
                                                 ▼
                            ┌─────────────────────────────────────────┐
                            │         Orchestrator Event Loop         │
-                           └────────┬───────────────────────┬────────┘
-                                    │                       │
-                                    ▼                       │
-                           ┌──────────────────┐             │
-                           │   Leader Agent   │             │
-                           │ (Decomposition)  │             │
-                           └────────┬─────────┘             │
+                           └────────┬──────────────────────┬─────────┘
+                                    │                      │
+                                    ▼                      │
+                           ┌──────────────────┐            │
+                           │   Leader Agent   │            │
+                           │ (Decomposition)  │            │
+                           └────────┬─────────┘            │
                                     │ Sub-tasks             │
                                     ▼                       │
-                     ┌──────────────────────────────┐       │
-                     │ Parallel Implementers        │       │
-                     │ (asyncio.gather)             │       │
-                     │ Task 1   | Task 2   | Task 3 │       │
-                     └──────────────┬───────────────┘       │
+                     ┌──────────────────────────────┐      │
+                     │ Parallel Implementers        │      │
+                     │ (asyncio.gather)             │      │
+                     │ Task 1   | Task 2   | Task 3 │      │
+                     └──────────────┬───────────────┘      │
                                     │ Outputs               │
                                     ▼                       ▼
                      ┌──────────────────────────────┐  ┌──────────────────┐
                      │ Reviewer Agent (Read-Only)   │◄─┤ RAG Knowledge    │
                      │ - Audits diffs vs standards  │  │ Base (pgvector + │
-                     │ - Cites external guidelines  │  │ Nemotron Embed)  │
+                     │ - Cites relevant guidelines │  │ Nemotron Embed)  │
                      └──────────────┬───────────────┘  └──────────────────┘
                                     │ PASS / FAIL (with retry loop)
                                     ▼
@@ -58,70 +57,68 @@ Single-agent LLM systems suffer from an inherent **confirmation bias**: when the
 
 ## 2. Key Features
 
-- **Concurrent Task Dispatch**: Independent sub-tasks run in parallel using `asyncio.gather`, minimizing end-to-end wall-clock latency while maintaining isolated task context.
-- **RAG-Grounded Auditing**: Every code review queries a pgvector database indexed with coding standards, API specs, and review checklists using NVIDIA Nemotron-3.5-Embed-8B embeddings.
-- **Guaranteed Verdict Citations**: Reviews explicitly cite governing documents (e.g., `python-style-guide.md`, `api-design-standards.md`) and pinpoint line-level issues.
-- **Structured Feedback Loop**: Failed implementations receive targeted feedback and retry up to `MAX_RETRIES` (default: 3). If unresolvable, the system gracefully force-merges with explicit `## ⚠ Unresolved Concerns` caveats.
-- **Production-Hardened MCP Server**: Built-in 120s execution timeout returning partial results on overrun, automatic Groq rate-limit retries, and pgvector fallback.
+- **Concurrent task dispatch**: Independent sub-tasks run in parallel using `asyncio.gather`, reducing end-to-end wall-clock latency while maintaining isolated task context.
+- **RAG-grounded auditing**: Code reviews query a pgvector database indexed with coding standards, API specifications, and review checklists, using NVIDIA Nemotron-3.5-Embed-8B embeddings.
+- **Verdict citations**: Reviews cite governing documents (for example, `python-style-guide.md` and `api-design-standards.md`) and identify line-level issues.
+- **Structured feedback loop**: Failed implementations receive targeted feedback and can retry up to `MAX_RETRIES` (default: 3). If an issue remains unresolved, the system can force-merge with an explicit caveat.
+- **MCP server safeguards**: Includes a 120-second execution timeout with partial results on overrun, automatic Groq rate-limit retries, and pgvector fallback behavior.
 
 ---
 
 ## 3. Architecture & Components
 
-| Component | File | Responsibilities | Tools Allowed |
-| :--- | :--- | :--- | :--- |
-| **MCP Server** | [mcp_server.py](file:///c:/Users/JANARDHAN/OneDrive/Desktop/RAG Agent/mcp_server.py) | FastMCP server exposing `handle_prompt` with judge-facing metadata and timeout controls. | Stdio / SSE / HTTP |
-| **Orchestrator** | [orchestrator.py](file:///c:/Users/JANARDHAN/OneDrive/Desktop/RAG Agent/orchestrator.py) | Coordinates pipeline event loop, task queues, concurrency, retry budget, and aggregate verdict reporting. | Internal Agents |
-| **Leader Agent** | [agents/leader.py](file:///c:/Users/JANARDHAN/OneDrive/Desktop/RAG Agent/agents/leader.py) | Analyzes prompts into independent sub-tasks; synthesizes final multi-part deliverables with warning sections. | None (Planning only) |
-| **Implementer Agent** | [agents/implementer.py](file:///c:/Users/JANARDHAN/OneDrive/Desktop/RAG Agent/agents/implementer.py) | Stateless code generation; incorporates previous diffs and reviewer feedback on revision cycles. | Code Generation |
-| **Reviewer Agent** | [agents/reviewer.py](file:///c:/Users/JANARDHAN/OneDrive/Desktop/RAG Agent/agents/reviewer.py) | Performs strict line-by-line audits against retrieved RAG standards; emits structured `Verdict` objects. | Read-Only Audit |
-| **RAG Embedder** | [rag/embedder.py](file:///c:/Users/JANARDHAN/OneDrive/Desktop/RAG Agent/rag/embedder.py) | NVIDIA Nemotron-3.5 4096-dim embeddings with L2 normalization, query prefixes, and local response caching. | REST (NVIDIA API) |
-| **RAG Retriever** | [rag/retriever.py](file:///c:/Users/JANARDHAN/OneDrive/Desktop/RAG Agent/rag/retriever.py) | Cosine similarity query engine against pgvector with threshold filtering and array fallback. | PostgreSQL |
+| Component | File | Responsibilities |
+| :--- | :--- | :--- |
+| **MCP Server** | [`mcp_server.py`](mcp_server.py) | FastMCP server exposing `handle_prompt`, with judge-facing metadata and timeout controls. |
+| **Orchestrator** | [`orchestrator.py`](orchestrator.py) | Coordinates the pipeline event loop, task queues, concurrency, retry budget, and aggregation. |
+| **Leader Agent** | [`agents/leader.py`](agents/leader.py) | Decomposes prompts into independent sub-tasks and synthesizes final multi-part deliverables. |
+| **Implementer Agent** | [`agents/implementer.py`](agents/implementer.py) | Generates code for assigned tasks and incorporates prior diffs and reviewer feedback. |
+| **Reviewer Agent** | [`agents/reviewer.py`](agents/reviewer.py) | Audits changes against retrieved RAG standards and emits structured findings. |
+| **RAG Embedder** | [`rag/embedder.py`](rag/embedder.py) | Creates NVIDIA Nemotron embeddings with normalization and configured query prefixes. |
+| **RAG Retriever** | [`rag/retriever.py`](rag/retriever.py) | Queries pgvector using cosine similarity, threshold filtering, and fallback retrieval. |
 
 ---
 
-## 4. Setup, Database & Quickstart Guide
+## 4. Setup, Database & Quickstart
 
-Anyone cloning this repository can get the full multi-agent system and database running in under 3 minutes.
+The database schema is created automatically on startup. The standards corpus is embedded and inserted by the indexing script. PostgreSQL can be run locally or launched as a pgvector container with Docker.
 
-### What Happens to the Database?
-When you clone this repository, you do **not** need to download or restore a database dump. 
-* The database schema (`document_embeddings` table) is created **automatically** on first startup.
-* The standards corpus is embedded and inserted **automatically** into your database by running the indexing script.
-* You can run PostgreSQL locally or launch a ready-to-go `pgvector` container in one command via Docker.
+### Step 1: Clone and install dependencies
 
----
+Replace `<OWNER>` with the GitHub account or organization that hosts this repository.
 
-### Step 1: Clone & Install Dependencies
 ```bash
-git clone https://github.com/JanardhanS56/BlindSpot-Auditor.git
+git clone https://github.com/<OWNER>/BlindSpot-Auditor.git
 cd BlindSpot-Auditor
 pip install -r requirements.txt
 ```
 
----
+### Step 2: Start the database
 
-### Step 2: Start the Database (Docker or Local)
+**Option A: Docker (recommended)**
 
-**Option A: 1-Line Docker Setup (Recommended)**
 ```bash
-docker run -d --name blindspot-db -p 5432:5432 -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=postgres ankane/pgvector
+docker run -d --name blindspot-db -p 5432:5432 \
+  -e POSTGRES_PASSWORD=postgres \
+  -e POSTGRES_DB=postgres \
+  ankane/pgvector
 ```
 
-**Option B: Existing Local PostgreSQL**
-If you already have PostgreSQL installed on your machine, simply ensure it is running on port `5432` and that the database user credentials match your `.env` configuration. (Native `pgvector` is optional; an automatic array dot-product fallback activates if the C extension is not installed).
+**Option B: Existing PostgreSQL installation**
 
----
+Ensure PostgreSQL is running on port `5432` and that the database credentials match your `.env` configuration. The database must support the `pgvector` extension for vector-based retrieval.
 
-### Step 3: Configure API Keys & Environment Variables
-Copy the template file:
+### Step 3: Configure API keys and environment variables
+
+Copy the template and edit `.env` with your API keys and database settings:
+
 ```bash
 cp .env.example .env
 ```
-Edit `.env` with your API keys:
-1. **Groq API Key**: Free tier available at [console.groq.com](https://console.groq.com/keys).
-2. **NVIDIA API Key**: Free developer credits available at [build.nvidia.com](https://build.nvidia.com/nvidia/nemotron-3_5-embed-8b-bf16).
-3. **Database Credentials**: If using Option A (Docker), the default credentials in `.env.example` (`localhost:5432`, `postgres`/`postgres`) work out of the box.
+
+- **Groq API key**: Available from [Groq Console](https://console.groq.com/keys).
+- **NVIDIA API key**: Available from [NVIDIA Build](https://build.nvidia.com/nvidia/nemotron-3_5-embed-8b-bf16).
+- **Database credentials**: The defaults below are suitable for the Docker command above; change them if your database uses different settings.
 
 ```env
 GROQ_API_KEY=gsk_your_groq_key_here
@@ -133,33 +130,36 @@ POSTGRES_USERNAME=postgres
 POSTGRES_PASSWORD=postgres
 ```
 
----
+### Step 4: Index the knowledge base
 
-### Step 4: Index the Knowledge Base
-Run the automated indexing pipeline. This creates the PostgreSQL table, reads the 4 standard files in `knowledge_base/`, computes their 4,096-dimensional embeddings via NVIDIA Nemotron, and saves them to the database:
+Run the indexing pipeline to create the database table, read the standard documents in `knowledge_base/`, generate 4,096-dimensional embeddings, and store them in PostgreSQL:
+
 ```bash
 python -m rag.indexer
 ```
-*Expected output: `Successfully indexed 17 chunks across 4 documents into document_embeddings table.`*
 
----
+Expected output resembles:
 
-### Step 5: Test the System Immediately
+```text
+Successfully indexed 17 chunks across 4 documents into document_embeddings table.
+```
 
-**Test 1: Quick Command-Line Prompt**
-Verify the multi-agent triad live in your terminal:
+### Step 5: Run the system
+
+**Quick command-line prompt**
+
 ```bash
 python -c "import asyncio; from orchestrator import Orchestrator; asyncio.run(Orchestrator().run('Write a thread-safe singleton in Python with type hints and docstrings'))"
 ```
 
-**Test 2: Full Integration Test**
-Run the automated end-to-end verification suite:
+**Integration test**
+
 ```bash
 python -m pytest tests/test_integration_final.py -v -s
 ```
 
-**Test 3: Benchmark Evaluation Suite**
-Run the 5-prompt evaluation comparing single-agent baseline vs. the AKILI-SPECS triad:
+**Benchmark evaluation**
+
 ```bash
 python tests/run_evaluation.py
 ```
@@ -168,21 +168,20 @@ python tests/run_evaluation.py
 
 ## 5. Connecting to Claude Desktop / Cursor (MCP Mode)
 
-To expose the system as a real-time coding tool to MCP clients (such as Claude Desktop, Cursor, or Antigravity):
+Start the MCP server using stdio transport:
 
 ```bash
-# Start the MCP server (stdio transport)
 python mcp_server.py --transport stdio
 ```
 
-#### Client Configuration
-Add the server to your `claude_desktop_config.json` (or IDE MCP configuration):
+Add a server entry to `claude_desktop_config.json` or your IDE's MCP configuration. Replace `/path/to/BlindSpot-Auditor` with the absolute path to the repository on your system:
+
 ```json
 {
   "mcpServers": {
     "blindspot-auditor": {
       "command": "python",
-      "args": ["-u", "c:/Users/JANARDHAN/OneDrive/Desktop/RAG Agent/mcp_server.py", "--transport", "stdio"],
+      "args": ["-u", "/path/to/BlindSpot-Auditor/mcp_server.py", "--transport", "stdio"],
       "env": {
         "GROQ_API_KEY": "your_groq_api_key",
         "NVIDIA_API_KEY": "your_nvidia_api_key"
@@ -196,30 +195,32 @@ Add the server to your `claude_desktop_config.json` (or IDE MCP configuration):
 
 ## 6. Evaluation: Single-Agent Baseline vs. AKILI-SPECS Triad
 
-To rigorously prove the thesis—**"Does the multi-agent team beat a single agent working alone?"**—we evaluated 5 challenging prompt categories containing deliberate traps (subtle concurrency bugs, missing SQL indexes, edge-case logic, and hallucination probes).
+The evaluation compares a single-agent baseline with the multi-agent system across five prompt categories designed to exercise concurrency, reasoning, and retrieval behavior.
 
 Run the full evaluation suite:
+
 ```bash
 python tests/run_evaluation.py
 ```
 
-### Quantitative Benchmark Results
+### Quantitative benchmark results
 
 | Prompt ID | Category & Trap | Baseline (s) | Triad (s) | Tasks | Retries | Force Merges | RAG Citations | Outcome |
-| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| `code-gen` | LRU Cache with TTL (race condition & lock granularity) | 8.2s | 87.5s | 3 | 0 | 0 | 3 | **Triad caught race conditions**; partitioned cache into lock-safe methods. |
-| `research` | Microservices vs. Monolith trade-offs for 5-dev team | 4.5s | 40.9s | 1 | 1 | 0 | 2 | **Triad audited formatting** and enforced actionable small-team sizing. |
-| `logic` | High-throughput distributed rate-limiter logic | 8.6s | 142.0s | 3 | 2 | 0 | 5 | **Triad detected clock skew & memory leaks**, forcing 2 corrective revisions. |
-| `mixed` | Social media database schema (indexes & FK constraints) | 12.0s | 90.8s | 2 | 0 | 0 | 1 | **Triad verified composite indexes** on follower lookups. |
-| `hallucination`| Fabricated "Robertson-Walker consensus theorem" | 10.6s | 213.4s | 2 | 1 | 1 | 7 | **Triad RAG returned 0 matches**; Reviewer flagged theorem as unsupported; Leader merged with warning caveat. |
+| :--- | :--- | ---: | ---: | ---: | ---: | ---: | ---: | :--- |
+| `code-gen` | LRU Cache with TTL (race condition & lock granularity) | 8.2 | 87.5 | 3 | 0 | 0 | 3 | **Triad caught race conditions**; partitioned cache into lock-safe methods. |
+| `research` | Microservices vs. Monolith trade-offs for a 5-dev team | 4.5 | 40.9 | 1 | 1 | 0 | 2 | **Triad audited formatting** and enforced actionable small-team sizing. |
+| `logic` | High-throughput distributed rate-limiter logic | 8.6 | 142.0 | 3 | 2 | 0 | 5 | **Triad detected clock skew & memory leaks**, prompting two corrective revisions. |
+| `mixed` | Social media database schema (indexes & FK constraints) | 12.0 | 90.8 | 2 | 0 | 0 | 1 | **Triad verified composite indexes** on follower lookups. |
+| `hallucination` | Fabricated "Robertson-Walker consensus theorem" | 10.6 | 213.4 | 2 | 1 | 1 | 7 | **RAG returned no matches**; the reviewer flagged the theorem as unsupported and the leader merged with a caveat. |
 
-Detailed side-by-side markdown artifacts for all prompts are stored in [tests/eval_results/](file:///c:/Users/JANARDHAN/OneDrive/Desktop/RAG Agent/tests/eval_results).
+Detailed side-by-side evaluation artifacts are available in [`tests/eval_results/`](tests/eval_results/).
 
 ---
 
 ## 7. Testing Suite
 
-The project includes unit, smoke, RAG, and comprehensive integration tests:
+The project includes unit, smoke, RAG, and integration tests:
+
 ```bash
 # Run smoke tests
 python -m pytest tests/test_smoke.py
@@ -235,42 +236,43 @@ python -m pytest tests/test_integration_final.py
 
 ## 8. Repository Structure
 
-```
+```text
 .
-├── config.py                 # Configuration and environment settings
-├── models.py                 # Pydantic schemas (Task, Verdict, AggregateReport)
-├── llm_client.py             # Groq LLM client with fallback & rate-limit resilience
-├── orchestrator.py           # Core multi-agent loop with asyncio.gather
-├── mcp_server.py             # FastMCP server entry point
-├── requirements.txt          # Project dependencies
-├── model_card.md             # NVIDIA Nemotron-3.5 embedding model specification
-├── knowledge_base/           # Standard documents for RAG grounding
+├── config.py                     # Configuration and environment settings
+├── models.py                     # Pydantic schemas (Task, Verdict, AggregateReport)
+├── llm_client.py                 # Groq LLM client with fallback and rate-limit resilience
+├── orchestrator.py               # Core multi-agent loop with asyncio.gather
+├── mcp_server.py                 # FastMCP server entry point
+├── requirements.txt              # Project dependencies
+├── model_card.md                 # NVIDIA Nemotron-3.5 embedding model specification
+├── knowledge_base/               # Standard documents for RAG grounding
+│   ├── README.md
 │   ├── python-style-guide.md
 │   ├── code-review-checklist.md
 │   ├── api-design-standards.md
 │   └── general-requirements.md
-├── agents/                   # Agent implementations
-│   ├── base.py               # Abstract base agent
-│   ├── leader.py             # Planning, decomposition, and merging
-│   ├── implementer.py        # Stateless code generation
-│   └── reviewer.py           # Read-only audit with RAG context
-├── rag/                      # RAG vector storage and retrieval
-│   ├── chunker.py            # Markdown header and token-aware chunker
-│   ├── embedder.py           # NVIDIA Nemotron embedding client
-│   ├── indexer.py            # Corpus loader and vector store populator
-│   ├── retriever.py          # Vector similarity search engine
-│   └── setup_db.py           # PostgreSQL / pgvector database setup
-└── tests/                    # Evaluation and test suites
-    ├── test_baseline.py      # SingleAgentBaseline implementation
-    ├── run_evaluation.py     # Evaluation runner comparing baseline vs triad
-    ├── test_smoke.py         # Agent and loop smoke tests
-    ├── test_rag.py           # Embedder and retriever unit tests
+├── agents/                       # Agent implementations
+│   ├── base.py                   # Abstract base agent
+│   ├── leader.py                 # Planning, decomposition, and merging
+│   ├── implementer.py            # Stateless code generation
+│   └── reviewer.py               # Read-only audit with RAG context
+├── rag/                          # RAG vector storage and retrieval
+│   ├── chunker.py                # Markdown header and token-aware chunker
+│   ├── embedder.py               # NVIDIA Nemotron embedding client
+│   ├── indexer.py                # Corpus loader and vector store populator
+│   ├── retriever.py              # Vector similarity search engine
+│   └── setup_db.py               # PostgreSQL / pgvector database setup
+└── tests/                        # Evaluation and test suites
+    ├── test_baseline.py          # SingleAgentBaseline implementation
+    ├── run_evaluation.py         # Evaluation runner comparing baseline vs triad
+    ├── test_smoke.py             # Agent and loop smoke tests
+    ├── test_rag.py               # Embedder and retriever unit tests
     ├── test_integration_final.py # End-to-end integration test
-    └── eval_results/         # 10 side-by-side benchmark outputs
+    └── eval_results/             # Benchmark outputs
 ```
 
 ---
 
 ## 9. License
 
-MIT License. See LICENSE for details.
+MIT License. See [`LICENSE`](LICENSE) for details.
