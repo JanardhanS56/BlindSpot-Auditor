@@ -15,7 +15,7 @@ If given reviewer_notes from a previous review, address each noted issue explici
 
 
 class ImplementerAgent(BaseAgent):
-    """Implementer agent: generates code or content for a specific task."""
+    """Implementer agent: generates code or content for a specific task in a stateless manner."""
 
     def __init__(self, llm_client: GroqLLMClient | None = None):
         try:
@@ -25,9 +25,17 @@ class ImplementerAgent(BaseAgent):
         super().__init__(name="implementer", system_prompt=prompt, llm_client=llm_client)
         self._history: dict[str, list[str]] = {}
 
-    async def generate(self, task: Task) -> TaskResult:
-        """Generates code or technical content for the given task."""
-        self.logger.info("Generating for task %s (attempt %d)", task.id, task.attempt)
+    async def generate(
+        self,
+        task: Task,
+        previous_content: str | None = None,
+    ) -> TaskResult:
+        """Generates code or technical content for the given task.
+
+        Stateless per-call: can receive previous_content directly to compute diffs
+        without relying on shared mutable state.
+        """
+        self.logger.info("[Task %s] Generating for task (attempt %d)", task.id, task.attempt)
 
         prompt_parts = [
             f"Assigned Task ID: {task.id}",
@@ -79,18 +87,24 @@ class ImplementerAgent(BaseAgent):
                     metadata["assumptions"] = parsed["assumptions"]
                 if "changes_from_previous" in parsed:
                     metadata["changes_from_previous"] = parsed["changes_from_previous"]
-        except Exception:
-            # Response was directly markdown or code, keep content as response_text
+        except Exception as json_err:
+            self.logger.debug(
+                "[Task %s] Response was not valid JSON dictionary (%s). Using raw text.",
+                task.id,
+                json_err,
+            )
             content = response_text.strip()
 
         # Compute diff if prior attempt existed
         diff_str: str | None = None
-        prior_versions = self._history.setdefault(task.id, [])
-        if prior_versions:
-            last_content = prior_versions[-1]
+        base_content = previous_content
+        if base_content is None and task.id in self._history and self._history[task.id]:
+            base_content = self._history[task.id][-1]
+
+        if base_content:
             diff_lines = list(
                 difflib.unified_diff(
-                    last_content.splitlines(keepends=True),
+                    base_content.splitlines(keepends=True),
                     content.splitlines(keepends=True),
                     fromfile=f"{task.id}_v{task.attempt - 1}",
                     tofile=f"{task.id}_v{task.attempt}",
@@ -98,8 +112,19 @@ class ImplementerAgent(BaseAgent):
             )
             if diff_lines:
                 diff_str = "".join(diff_lines)
+                self.logger.info(
+                    "[Task %s] Generated diff (%d lines changed)",
+                    task.id,
+                    len(diff_lines),
+                )
 
-        prior_versions.append(content)
+        self._history.setdefault(task.id, []).append(content)
+        self.logger.info(
+            "[Task %s] Generation complete (%d characters, attempt %d)",
+            task.id,
+            len(content),
+            task.attempt,
+        )
 
         return TaskResult(
             task_id=task.id,

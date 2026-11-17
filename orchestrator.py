@@ -66,7 +66,8 @@ class Orchestrator:
         while not resolved:
             try:
                 # Implementer generates output
-                result: TaskResult = await self.implementer.generate(task)
+                prev_text = last_result.content if last_result else None
+                result: TaskResult = await self.implementer.generate(task, previous_content=prev_text)
                 last_result = result
             except Exception as gen_err:
                 self.logger.error("Implementer error for task %s: %s", task.id, gen_err)
