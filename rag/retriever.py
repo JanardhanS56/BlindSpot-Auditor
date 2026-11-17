@@ -21,8 +21,8 @@ class KnowledgeRetriever:
     def __init__(
         self,
         embedder: NvidiaEmbedder | None = None,
-        default_top_k: int = config.TOP_K,
-        min_similarity: float = 0.3,
+        default_top_k: int = getattr(config, "RAG_TOP_K", config.TOP_K),
+        min_similarity: float = getattr(config, "RAG_MIN_SIMILARITY", 0.3),
     ):
         self.embedder = embedder or NvidiaEmbedder()
         self.default_top_k = default_top_k

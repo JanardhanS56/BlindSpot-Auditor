@@ -32,7 +32,12 @@ class NvidiaEmbedder:
     ):
         self.api_key = api_key or config.NVIDIA_API_KEY
         self.model = model
-        self.truncate_dim = truncate_dim
+        if truncate_dim is not None:
+            self.truncate_dim = truncate_dim
+        elif getattr(config, "EMBEDDING_TRUNCATE", False):
+            self.truncate_dim = getattr(config, "EMBEDDING_DIM", 1024)
+        else:
+            self.truncate_dim = None
         self.timeout = timeout
         self.max_retries = max_retries
 
