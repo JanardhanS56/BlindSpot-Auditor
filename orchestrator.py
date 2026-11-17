@@ -1,10 +1,11 @@
+import asyncio
 import logging
 from typing import Any
 from agents.implementer import ImplementerAgent
 from agents.leader import LeaderAgent
 from agents.reviewer import ReviewerAgent
 from config import MAX_RETRIES
-from models import Task, TaskResult, Verdict
+from models import Issue, Task, TaskResult, Verdict
 from rag.embedder import NvidiaEmbedder
 from rag.indexer import KnowledgeBaseIndexer
 from rag.retriever import KnowledgeRetriever
@@ -55,6 +56,106 @@ class Orchestrator:
             self.logger.warning("Could not check or run initial indexing: %s", e)
             return 0
 
+    async def _process_task(self, task: Task) -> tuple[TaskResult, Verdict]:
+        """Encapsulates generate -> review -> retry loop for a single task."""
+        self.logger.info("Starting workflow for task %s: %s", task.id, task.description[:60])
+        resolved = False
+        last_result: TaskResult | None = None
+        last_verdict: Verdict | None = None
+
+        while not resolved:
+            try:
+                # Implementer generates output
+                result: TaskResult = await self.implementer.generate(task)
+                last_result = result
+            except Exception as gen_err:
+                self.logger.error("Implementer error for task %s: %s", task.id, gen_err)
+                last_result = TaskResult(
+                    task_id=task.id,
+                    content=f"Error generating implementation: {gen_err}",
+                    metadata={"error": str(gen_err), "attempt": task.attempt},
+                )
+
+            try:
+                # Reviewer audits output (grounded in RAG)
+                verdict: Verdict = await self.reviewer.audit(task, last_result)
+                last_verdict = verdict
+            except Exception as rev_err:
+                self.logger.error("Reviewer error for task %s: %s", task.id, rev_err)
+                last_verdict = Verdict(
+                    task_id=task.id,
+                    passed=False,
+                    issues=[Issue(severity="critical", description=f"Reviewer exception: {rev_err}")],
+                    references=["Fallback audit"],
+                    confidence=0.0,
+                    summary=f"FAIL - Reviewer exception: {rev_err}",
+                )
+
+            self.execution_log.append({
+                "stage": "audit",
+                "task_id": task.id,
+                "attempt": task.attempt,
+                "passed": last_verdict.passed,
+                "summary": last_verdict.summary,
+                "references": last_verdict.references,
+            })
+
+            if last_verdict.passed:
+                self.logger.info("Task %s PASSED on attempt %d", task.id, task.attempt)
+                resolved = True
+            else:
+                self.logger.warning(
+                    "Task %s FAILED on attempt %d: %s",
+                    task.id,
+                    task.attempt,
+                    last_verdict.summary,
+                )
+
+                if task.attempt >= self.max_retries:
+                    self.logger.warning(
+                        "Task %s force-merged after %d failed attempts. Unresolved issue: %s",
+                        task.id,
+                        task.attempt,
+                        last_verdict.summary,
+                    )
+                    resolved = True
+                else:
+                    # Re-dispatch with reviewer notes including cited sources
+                    notes_list = [f"Verdict: {last_verdict.summary}"]
+                    if last_verdict.references:
+                        notes_list.append(
+                            "Governing Standards & References:\n"
+                            + "\n".join(f"- {ref}" for ref in last_verdict.references)
+                        )
+
+                    notes_list.append("Specific Issues to Address:")
+                    primary_ref = (
+                        last_verdict.references[0]
+                        if last_verdict.references
+                        else "project standards"
+                    )
+                    for issue in last_verdict.issues:
+                        loc = f" at {issue.location}" if issue.location else ""
+                        sug = f" Suggestion: {issue.suggestion}" if issue.suggestion else ""
+                        notes_list.append(
+                            f"- [{issue.severity.upper()}]{loc}: {issue.description} (per {primary_ref}).{sug}"
+                        )
+
+                    task.attempt += 1
+                    task.reviewer_notes = "\n".join(notes_list)
+                    self.logger.info(
+                        "Re-dispatching task %s for attempt %d with cited reviewer notes",
+                        task.id,
+                        task.attempt,
+                    )
+
+        if last_result is None:
+            last_result = TaskResult(task_id=task.id, content="")
+        if last_verdict is None:
+            last_verdict = Verdict(task_id=task.id, passed=True, summary="Default pass")
+
+        return last_result, last_verdict
+
     async def run(self, prompt: str) -> str:
         """Executes the complete AKILI-SPECS workflow for a user prompt."""
         self.logger.info("Starting orchestration for prompt: %s", prompt[:80])
@@ -71,76 +172,23 @@ class Orchestrator:
             "task_ids": [t.id for t in tasks],
         })
 
+        # Step 2: Process tasks concurrently in parallel
+        task_outcomes: list[tuple[TaskResult, Verdict]] = await asyncio.gather(
+            *[self._process_task(task) for task in tasks]
+        )
+
         passed_results: list[TaskResult] = []
         warnings: list[str] = []
 
-        # Step 2: Process tasks
-        for task in tasks:
-            self.logger.info("Starting workflow for task %s: %s", task.id, task.description[:60])
-            resolved = False
-
-            while not resolved:
-                # Implementer generates output
-                result: TaskResult = await self.implementer.generate(task)
-
-                # Reviewer audits output (grounded in RAG)
-                verdict: Verdict = await self.reviewer.audit(task, result)
-
-                self.execution_log.append({
-                    "stage": "audit",
-                    "task_id": task.id,
-                    "attempt": task.attempt,
-                    "passed": verdict.passed,
-                    "summary": verdict.summary,
-                    "references": verdict.references,
-                })
-
-                if verdict.passed:
-                    self.logger.info("Task %s PASSED on attempt %d", task.id, task.attempt)
-                    passed_results.append(result)
-                    resolved = True
-                else:
-                    self.logger.warning(
-                        "Task %s FAILED on attempt %d: %s",
-                        task.id,
-                        task.attempt,
-                        verdict.summary,
-                    )
-
-                    if task.attempt >= self.max_retries:
-                        warning_msg = (
-                            f"Task {task.id} force-merged after {task.attempt} failed attempts. "
-                            f"Unresolved issue: {verdict.summary}"
-                        )
-                        self.logger.warning(warning_msg)
-                        warnings.append(warning_msg)
-                        passed_results.append(result)
-                        resolved = True
-                    else:
-                        # Re-dispatch with reviewer notes including cited sources
-                        notes_list = [f"Verdict: {verdict.summary}"]
-                        if verdict.references:
-                            notes_list.append(
-                                "Governing Standards & References:\n"
-                                + "\n".join(f"- {ref}" for ref in verdict.references)
-                            )
-
-                        notes_list.append("Specific Issues to Address:")
-                        primary_ref = verdict.references[0] if verdict.references else "project standards"
-                        for issue in verdict.issues:
-                            loc = f" at {issue.location}" if issue.location else ""
-                            sug = f" Suggestion: {issue.suggestion}" if issue.suggestion else ""
-                            notes_list.append(
-                                f"- [{issue.severity.upper()}]{loc}: {issue.description} (per {primary_ref}).{sug}"
-                            )
-
-                        task.attempt += 1
-                        task.reviewer_notes = "\n".join(notes_list)
-                        self.logger.info(
-                            "Re-dispatching task %s for attempt %d with cited reviewer notes",
-                            task.id,
-                            task.attempt,
-                        )
+        for result, verdict in task_outcomes:
+            passed_results.append(result)
+            if not verdict.passed:
+                warning_msg = (
+                    f"Task {result.task_id} force-merged after {result.metadata.get('attempt', self.max_retries)} failed attempts. "
+                    f"Unresolved issue: {verdict.summary}"
+                )
+                self.logger.warning(warning_msg)
+                warnings.append(warning_msg)
 
         # Step 3: Leader merges all outputs
         self.logger.info("Merging %d results with %d warnings", len(passed_results), len(warnings))
