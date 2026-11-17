@@ -65,6 +65,7 @@ class Orchestrator:
         resolved = False
         last_result: TaskResult | None = None
         last_verdict: Verdict | None = None
+        task_start = time.perf_counter()
 
         while not resolved:
             self.logger.info(
@@ -184,6 +185,13 @@ class Orchestrator:
             last_result = TaskResult(task_id=task.id, content="")
         if last_verdict is None:
             last_verdict = Verdict(task_id=task.id, passed=True, summary="Default pass")
+
+        task_end = time.perf_counter()
+        if not hasattr(last_result, "metadata") or last_result.metadata is None:
+            last_result.metadata = {}
+        last_result.metadata["start_time"] = task_start
+        last_result.metadata["end_time"] = task_end
+        last_result.metadata["duration"] = round(task_end - task_start, 3)
 
         self.completed_results.append(last_result)
         self.completed_verdicts.append(last_verdict)
