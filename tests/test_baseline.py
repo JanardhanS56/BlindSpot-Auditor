@@ -20,11 +20,11 @@ class SingleAgentBaseline:
     def __init__(
         self,
         llm_client: GroqLLMClient | None = None,
-        model: str = DEFAULT_MODEL,
+        model: str | None = None,
         temperature: float = 0.2,
     ):
         self.llm_client = llm_client or default_llm_client
-        self.model = model
+        self.model = model or DEFAULT_MODEL
         self.temperature = temperature
         self.system_prompt = "You are a helpful assistant."
 

@@ -5,6 +5,7 @@ from typing import Any
 from agents.implementer import ImplementerAgent
 from agents.leader import LeaderAgent
 from agents.reviewer import ReviewerAgent
+import config
 from config import MAX_RETRIES
 from models import AggregateReport, Issue, Task, TaskResult, Verdict
 from rag.embedder import NvidiaEmbedder

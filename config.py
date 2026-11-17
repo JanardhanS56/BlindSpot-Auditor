@@ -10,7 +10,7 @@ load_dotenv(dotenv_path=env_path)
 
 # System constants
 MAX_RETRIES: int = 3
-DEFAULT_MODEL: str = "llama-3.3-70b-versatile"
+DEFAULT_MODEL: str = os.getenv("DEFAULT_MODEL", "openai/gpt-oss-120b")
 TOP_K: int = 5
 
 # Latency optimization options

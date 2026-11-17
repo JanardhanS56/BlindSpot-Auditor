@@ -60,9 +60,9 @@ class GroqLLMClient:
                         models_resp = await self.client.models.list()
                         available = [m.id for m in models_resp.data]
                         preferred = [
-                            "qwen/qwen3.8-27b",
                             "openai/gpt-oss-120b",
                             "openai/gpt-oss-20b",
+                            "qwen/qwen3.8-27b",
                         ]
                         chosen = next(
                             (m for m in preferred if m in available),
@@ -70,11 +70,13 @@ class GroqLLMClient:
                         )
                         if chosen:
                             self._fallback_model = chosen
-                            target_model = chosen
-                            logger.info("Falling back to model: %s", chosen)
-                            continue
+                            self.default_model = chosen
                     except Exception as list_err:
                         logger.error("Failed to query models list: %s", list_err)
+                if self._fallback_model:
+                    target_model = self._fallback_model
+                    logger.info("Retrying with fallback model: %s", self._fallback_model)
+                    continue
                 raise e
             except (RateLimitError, APIConnectionError) as e:
                 attempt += 1
