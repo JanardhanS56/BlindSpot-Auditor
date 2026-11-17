@@ -36,11 +36,13 @@ class Orchestrator:
         self.max_retries = max_retries
         self.logger = logging.getLogger("orchestrator")
         self.execution_log: list[dict[str, Any]] = []
+        self.completed_results: list[TaskResult] = []
+        self.completed_verdicts: list[Verdict] = []
 
     async def ensure_indexed(self) -> int:
         """Ensures the knowledge base is indexed in pgvector on startup."""
-        setup_database()
         try:
+            setup_database()
             conn = get_connection()
             cur = conn.cursor()
             cur.execute("SELECT COUNT(*) FROM document_embeddings;")
@@ -55,7 +57,7 @@ class Orchestrator:
                 return indexed_count
             return count
         except Exception as e:
-            self.logger.warning("Could not check or run initial indexing: %s", e)
+            self.logger.warning("Could not check or run initial indexing (falling back without pgvector): %s", e)
             return 0
 
     async def _process_task(self, task: Task) -> tuple[TaskResult, Verdict]:
@@ -183,6 +185,8 @@ class Orchestrator:
         if last_verdict is None:
             last_verdict = Verdict(task_id=task.id, passed=True, summary="Default pass")
 
+        self.completed_results.append(last_result)
+        self.completed_verdicts.append(last_verdict)
         return last_result, last_verdict
 
     def aggregate_verdicts(
@@ -237,6 +241,8 @@ class Orchestrator:
         start_time = time.perf_counter()
         self.logger.info("[ORCHESTRATOR] Prompt received — decomposing...")
         self.execution_log.clear()
+        self.completed_results.clear()
+        self.completed_verdicts.clear()
 
         # Ensure RAG knowledge base is available
         await self.ensure_indexed()

@@ -28,7 +28,24 @@ def extract_json(text: str) -> dict | list:
         start = text.find("{")
         end = text.rfind("}")
         if start != -1 and end != -1 and end > start:
-            return json.loads(text[start : end + 1])
+            try:
+                return json.loads(text[start : end + 1])
+            except json.JSONDecodeError:
+                pass
+
+        # If truncated inside tasks list, attempt recovery by closing the array at the last valid task
+        if '"tasks"' in text:
+            last_brace = text.rfind("}")
+            if last_brace != -1:
+                candidate = text[: last_brace + 1].strip()
+                if not candidate.endswith("]"):
+                    candidate += "\n  ]"
+                if not candidate.endswith("}"):
+                    candidate += "\n}"
+                try:
+                    return json.loads(candidate)
+                except Exception:
+                    pass
         raise
 
 
