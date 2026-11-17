@@ -10,8 +10,14 @@ load_dotenv(dotenv_path=env_path)
 
 # System constants
 MAX_RETRIES: int = 3
-DEFAULT_MODEL: str = "llama-3.3-70b-versatile"
+DEFAULT_MODEL: str = os.getenv("DEFAULT_MODEL", "openai/gpt-oss-120b")
 TOP_K: int = 5
+
+# Latency optimization options
+EMBEDDING_DIM: int = int(os.getenv("EMBEDDING_DIM", "4096"))
+EMBEDDING_TRUNCATE: bool = os.getenv("EMBEDDING_TRUNCATE", "false").lower() in ("true", "1")
+RAG_TOP_K: int = int(os.getenv("RAG_TOP_K", "5"))
+RAG_MIN_SIMILARITY: float = float(os.getenv("RAG_MIN_SIMILARITY", "0.3"))
 
 
 class Settings(BaseSettings):
@@ -41,6 +47,12 @@ class Settings(BaseSettings):
     default_model: str = DEFAULT_MODEL
     top_k: int = TOP_K
 
+    # Latency optimization options
+    embedding_dim: int = EMBEDDING_DIM
+    embedding_truncate: bool = EMBEDDING_TRUNCATE
+    rag_top_k: int = RAG_TOP_K
+    rag_min_similarity: float = RAG_MIN_SIMILARITY
+
 
 settings = Settings()
 
@@ -52,3 +64,7 @@ POSTGRES_PORT = settings.POSTGRES_PORT
 POSTGRES_MAINTAINANCE_DB = settings.POSTGRES_MAINTAINANCE_DB
 POSTGRES_USERNAME = settings.POSTGRES_USERNAME
 POSTGRES_PASSWORD = settings.POSTGRES_PASSWORD
+EMBEDDING_DIM = settings.embedding_dim
+EMBEDDING_TRUNCATE = settings.embedding_truncate
+RAG_TOP_K = settings.rag_top_k
+RAG_MIN_SIMILARITY = settings.rag_min_similarity

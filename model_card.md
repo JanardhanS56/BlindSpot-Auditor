@@ -69,3 +69,14 @@
 - The text embeddings are **identical** to `Nemotron-3-Embed-8B-BF16` since the LLM component is frozen.
 - Image inputs support text, tables, charts, and infographics.
 - Ethical considerations: Users responsible for input rights/permissions; NVIDIA recommends testing with use-case-specific data before deployment.
+
+---
+
+## AKILI-SPECS Integration Details
+
+In the AKILI-SPECS multi-agent code quality system, this model powers the RAG grounding mechanism for the Reviewer Agent:
+- **API Endpoint:** NVIDIA API Catalog (`https://integrate.api.nvidia.com/v1/embeddings`).
+- **Input Type Mapping:** Ingestion uses `input_type="passage"`, while search queries from the Reviewer Agent use `input_type="query"`.
+- **Dimensionality:** Default 4,096 dimensions; configurable down to 1,024 or 512 dimensions via `EMBEDDING_TRUNCATE=true` with post-truncation L2 normalization.
+- **In-Memory Caching:** Embeddings for frequent audit queries and repeated standards lookups are cached locally to minimize latency and avoid API limits.
+- **Database Storage:** Vectors are persisted to PostgreSQL `document_embeddings` table and queried using cosine similarity.

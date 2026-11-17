@@ -45,6 +45,16 @@ class RetrievedChunk(BaseModel):
     section: str | None = None
 
 
+class AggregateReport(BaseModel):
+    total_tasks: int
+    passed: int
+    failed_then_passed: int  # Passed after retry
+    force_merged: int  # Hit max retries
+    total_issues_found: int
+    issues_resolved: int
+    unresolved_warnings: list[str] = Field(default_factory=list)
+
+
 class AgentMessage(BaseModel):
     sender: Literal["leader", "implementer", "reviewer", "orchestrator"]
     recipient: Literal["leader", "implementer", "reviewer", "orchestrator"]

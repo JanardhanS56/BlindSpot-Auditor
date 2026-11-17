@@ -1,10 +1,13 @@
+import asyncio
 import logging
+import time
 from typing import Any
 from agents.implementer import ImplementerAgent
 from agents.leader import LeaderAgent
 from agents.reviewer import ReviewerAgent
+import config
 from config import MAX_RETRIES
-from models import Task, TaskResult, Verdict
+from models import AggregateReport, Issue, Task, TaskResult, Verdict
 from rag.embedder import NvidiaEmbedder
 from rag.indexer import KnowledgeBaseIndexer
 from rag.retriever import KnowledgeRetriever
@@ -33,11 +36,13 @@ class Orchestrator:
         self.max_retries = max_retries
         self.logger = logging.getLogger("orchestrator")
         self.execution_log: list[dict[str, Any]] = []
+        self.completed_results: list[TaskResult] = []
+        self.completed_verdicts: list[Verdict] = []
 
     async def ensure_indexed(self) -> int:
         """Ensures the knowledge base is indexed in pgvector on startup."""
-        setup_database()
         try:
+            setup_database()
             conn = get_connection()
             cur = conn.cursor()
             cur.execute("SELECT COUNT(*) FROM document_embeddings;")
@@ -52,102 +57,258 @@ class Orchestrator:
                 return indexed_count
             return count
         except Exception as e:
-            self.logger.warning("Could not check or run initial indexing: %s", e)
+            self.logger.warning("Could not check or run initial indexing (falling back without pgvector): %s", e)
             return 0
+
+    async def _process_task(self, task: Task) -> tuple[TaskResult, Verdict]:
+        """Encapsulates generate -> review -> retry loop for a single task."""
+        resolved = False
+        last_result: TaskResult | None = None
+        last_verdict: Verdict | None = None
+        task_start = time.perf_counter()
+
+        while not resolved:
+            self.logger.info(
+                "[IMPLEMENTER] %s: generating... (attempt %d/%d)",
+                task.id,
+                task.attempt,
+                self.max_retries,
+            )
+            try:
+                prev_text = last_result.content if last_result else None
+                result: TaskResult = await self.implementer.generate(task, previous_content=prev_text)
+                last_result = result
+                token_count = (
+                    result.metadata.get("llm_meta", {}).get("total_tokens")
+                    or len(result.content.split())
+                )
+                self.logger.info(
+                    "[IMPLEMENTER] %s: complete (%d tokens)",
+                    task.id,
+                    token_count,
+                )
+            except Exception as gen_err:
+                self.logger.error("Implementer error for task %s: %s", task.id, gen_err)
+                last_result = TaskResult(
+                    task_id=task.id,
+                    content=f"Error generating implementation: {gen_err}",
+                    metadata={"error": str(gen_err), "attempt": task.attempt},
+                )
+
+            rag_chunks_count = getattr(config, "RAG_TOP_K", 3)
+            self.logger.info(
+                "[REVIEWER] %s: reviewing with %d RAG chunks...",
+                task.id,
+                rag_chunks_count,
+            )
+            try:
+                verdict: Verdict = await self.reviewer.audit(task, last_result)
+                last_verdict = verdict
+            except Exception as rev_err:
+                self.logger.error("Reviewer error for task %s: %s", task.id, rev_err)
+                last_verdict = Verdict(
+                    task_id=task.id,
+                    passed=False,
+                    issues=[Issue(severity="critical", description=f"Reviewer exception: {rev_err}")],
+                    references=["Fallback audit"],
+                    confidence=0.0,
+                    summary=f"FAIL - Reviewer exception: {rev_err}",
+                )
+
+            self.execution_log.append({
+                "stage": "audit",
+                "task_id": task.id,
+                "attempt": task.attempt,
+                "passed": last_verdict.passed,
+                "summary": last_verdict.summary,
+                "references": last_verdict.references,
+                "issues": [i.model_dump() for i in last_verdict.issues],
+            })
+
+            if last_verdict.passed:
+                self.logger.info(
+                    "[REVIEWER] %s: PASS — %d issues",
+                    task.id,
+                    len(last_verdict.issues),
+                )
+                resolved = True
+            else:
+                crit_major = [i for i in last_verdict.issues if i.severity in ("critical", "major")]
+                crit_count = len(crit_major) if crit_major else len(last_verdict.issues) or 1
+                detail = crit_major[0].description if crit_major else last_verdict.summary
+                self.logger.warning(
+                    "[REVIEWER] %s: FAIL — %d critical/major issue (%s)",
+                    task.id,
+                    crit_count,
+                    detail,
+                )
+
+                if task.attempt >= self.max_retries:
+                    self.logger.warning(
+                        "[ORCHESTRATOR] %s: force-merged after %d failed attempts. Unresolved issue: %s",
+                        task.id,
+                        task.attempt,
+                        last_verdict.summary,
+                    )
+                    resolved = True
+                else:
+                    notes_list = [f"Verdict: {last_verdict.summary}"]
+                    if last_verdict.references:
+                        notes_list.append(
+                            "Governing Standards & References:\n"
+                            + "\n".join(f"- {ref}" for ref in last_verdict.references)
+                        )
+
+                    notes_list.append("Specific Issues to Address:")
+                    primary_ref = (
+                        last_verdict.references[0]
+                        if last_verdict.references
+                        else "project standards"
+                    )
+                    for issue in last_verdict.issues:
+                        loc = f" at {issue.location}" if issue.location else ""
+                        sug = f" Suggestion: {issue.suggestion}" if issue.suggestion else ""
+                        notes_list.append(
+                            f"- [{issue.severity.upper()}]{loc}: {issue.description} (per {primary_ref}).{sug}"
+                        )
+
+                    task.attempt += 1
+                    task.reviewer_notes = "\n".join(notes_list)
+                    self.logger.info(
+                        "[IMPLEMENTER] %s: re-generating with reviewer notes... (attempt %d/%d)",
+                        task.id,
+                        task.attempt,
+                        self.max_retries,
+                    )
+
+        if last_result is None:
+            last_result = TaskResult(task_id=task.id, content="")
+        if last_verdict is None:
+            last_verdict = Verdict(task_id=task.id, passed=True, summary="Default pass")
+
+        task_end = time.perf_counter()
+        if not hasattr(last_result, "metadata") or last_result.metadata is None:
+            last_result.metadata = {}
+        last_result.metadata["start_time"] = task_start
+        last_result.metadata["end_time"] = task_end
+        last_result.metadata["duration"] = round(task_end - task_start, 3)
+
+        self.completed_results.append(last_result)
+        self.completed_verdicts.append(last_verdict)
+        return last_result, last_verdict
+
+    def aggregate_verdicts(
+        self,
+        results: list[tuple[TaskResult, Verdict]],
+    ) -> AggregateReport:
+        """Aggregates all task verdicts into a comprehensive quality report."""
+        total_tasks = len(results)
+        passed = 0
+        failed_then_passed = 0
+        force_merged = 0
+        unresolved_warnings: list[str] = []
+
+        total_issues_found = sum(
+            len(entry.get("issues", []))
+            for entry in self.execution_log
+            if entry.get("stage") == "audit"
+        )
+
+        for result, verdict in results:
+            attempt = result.metadata.get("attempt", 1)
+            if verdict.passed:
+                if attempt > 1:
+                    failed_then_passed += 1
+                else:
+                    passed += 1
+            else:
+                force_merged += 1
+                warning_msg = (
+                    f"Task {result.task_id} force-merged after {attempt} failed attempts. "
+                    f"Unresolved issue: {verdict.summary}"
+                )
+                unresolved_warnings.append(warning_msg)
+
+        unresolved_issues_count = sum(
+            len(verdict.issues) for _, verdict in results if not verdict.passed
+        )
+        issues_resolved = max(0, total_issues_found - unresolved_issues_count)
+
+        return AggregateReport(
+            total_tasks=total_tasks,
+            passed=passed,
+            failed_then_passed=failed_then_passed,
+            force_merged=force_merged,
+            total_issues_found=total_issues_found,
+            issues_resolved=issues_resolved,
+            unresolved_warnings=unresolved_warnings,
+        )
 
     async def run(self, prompt: str) -> str:
         """Executes the complete AKILI-SPECS workflow for a user prompt."""
-        self.logger.info("Starting orchestration for prompt: %s", prompt[:80])
+        start_time = time.perf_counter()
+        self.logger.info("[ORCHESTRATOR] Prompt received — decomposing...")
         self.execution_log.clear()
+        self.completed_results.clear()
+        self.completed_verdicts.clear()
 
         # Ensure RAG knowledge base is available
         await self.ensure_indexed()
 
         # Step 1: Leader decomposes the prompt
         tasks: list[Task] = await self.leader.decompose(prompt)
+        self.logger.info(
+            "[LEADER] Decomposed into %d tasks: [%s]",
+            len(tasks),
+            ", ".join(t.id for t in tasks),
+        )
         self.execution_log.append({
             "stage": "decompose",
             "task_count": len(tasks),
             "task_ids": [t.id for t in tasks],
+            "elapsed_seconds": round(time.perf_counter() - start_time, 2),
         })
 
-        passed_results: list[TaskResult] = []
-        warnings: list[str] = []
+        # Step 2: Process tasks concurrently in parallel
+        task_outcomes: list[tuple[TaskResult, Verdict]] = await asyncio.gather(
+            *[self._process_task(task) for task in tasks]
+        )
 
-        # Step 2: Process tasks
-        for task in tasks:
-            self.logger.info("Starting workflow for task %s: %s", task.id, task.description[:60])
-            resolved = False
+        passed_results: list[TaskResult] = [res for res, _ in task_outcomes]
+        report: AggregateReport = self.aggregate_verdicts(task_outcomes)
 
-            while not resolved:
-                # Implementer generates output
-                result: TaskResult = await self.implementer.generate(task)
-
-                # Reviewer audits output (grounded in RAG)
-                verdict: Verdict = await self.reviewer.audit(task, result)
-
-                self.execution_log.append({
-                    "stage": "audit",
-                    "task_id": task.id,
-                    "attempt": task.attempt,
-                    "passed": verdict.passed,
-                    "summary": verdict.summary,
-                    "references": verdict.references,
-                })
-
-                if verdict.passed:
-                    self.logger.info("Task %s PASSED on attempt %d", task.id, task.attempt)
-                    passed_results.append(result)
-                    resolved = True
-                else:
-                    self.logger.warning(
-                        "Task %s FAILED on attempt %d: %s",
-                        task.id,
-                        task.attempt,
-                        verdict.summary,
-                    )
-
-                    if task.attempt >= self.max_retries:
-                        warning_msg = (
-                            f"Task {task.id} force-merged after {task.attempt} failed attempts. "
-                            f"Unresolved issue: {verdict.summary}"
-                        )
-                        self.logger.warning(warning_msg)
-                        warnings.append(warning_msg)
-                        passed_results.append(result)
-                        resolved = True
-                    else:
-                        # Re-dispatch with reviewer notes including cited sources
-                        notes_list = [f"Verdict: {verdict.summary}"]
-                        if verdict.references:
-                            notes_list.append(
-                                "Governing Standards & References:\n"
-                                + "\n".join(f"- {ref}" for ref in verdict.references)
-                            )
-
-                        notes_list.append("Specific Issues to Address:")
-                        primary_ref = verdict.references[0] if verdict.references else "project standards"
-                        for issue in verdict.issues:
-                            loc = f" at {issue.location}" if issue.location else ""
-                            sug = f" Suggestion: {issue.suggestion}" if issue.suggestion else ""
-                            notes_list.append(
-                                f"- [{issue.severity.upper()}]{loc}: {issue.description} (per {primary_ref}).{sug}"
-                            )
-
-                        task.attempt += 1
-                        task.reviewer_notes = "\n".join(notes_list)
-                        self.logger.info(
-                            "Re-dispatching task %s for attempt %d with cited reviewer notes",
-                            task.id,
-                            task.attempt,
-                        )
+        self.execution_log.append({
+            "stage": "aggregate",
+            "report": report.model_dump(),
+            "elapsed_seconds": round(time.perf_counter() - start_time, 2),
+        })
 
         # Step 3: Leader merges all outputs
-        self.logger.info("Merging %d results with %d warnings", len(passed_results), len(warnings))
-        final_answer: str = await self.leader.merge(passed_results, warnings=warnings)
+        if report.force_merged == 0:
+            self.logger.info("[LEADER] All tasks passed — merging final answer...")
+        else:
+            self.logger.info(
+                "[LEADER] Merging final answer with %d force-merged warnings...",
+                report.force_merged,
+            )
+
+        final_answer: str = await self.leader.merge(
+            passed_results,
+            warnings=report.unresolved_warnings,
+            report=report,
+        )
+        total_elapsed = time.perf_counter() - start_time
+        self.logger.info(
+            "[ORCHESTRATOR] Complete — %d tasks, %d retries, %d force-merges, %.1fs total",
+            report.total_tasks,
+            report.failed_then_passed,
+            report.force_merged,
+            total_elapsed,
+        )
         self.execution_log.append({
             "stage": "merge",
-            "warnings_count": len(warnings),
+            "warnings_count": len(report.unresolved_warnings),
+            "total_elapsed_seconds": round(total_elapsed, 2),
         })
 
         return final_answer

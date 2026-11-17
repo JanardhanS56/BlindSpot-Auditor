@@ -4,7 +4,7 @@ import re
 from typing import Any
 from agents.base import BaseAgent
 from llm_client import GroqLLMClient
-from models import Task, TaskResult
+from models import AggregateReport, Task, TaskResult
 
 logger = logging.getLogger(__name__)
 
@@ -28,7 +28,24 @@ def extract_json(text: str) -> dict | list:
         start = text.find("{")
         end = text.rfind("}")
         if start != -1 and end != -1 and end > start:
-            return json.loads(text[start : end + 1])
+            try:
+                return json.loads(text[start : end + 1])
+            except json.JSONDecodeError:
+                pass
+
+        # If truncated inside tasks list, attempt recovery by closing the array at the last valid task
+        if '"tasks"' in text:
+            last_brace = text.rfind("}")
+            if last_brace != -1:
+                candidate = text[: last_brace + 1].strip()
+                if not candidate.endswith("]"):
+                    candidate += "\n  ]"
+                if not candidate.endswith("}"):
+                    candidate += "\n}"
+                try:
+                    return json.loads(candidate)
+                except Exception:
+                    pass
         raise
 
 
@@ -110,9 +127,20 @@ class LeaderAgent(BaseAgent):
         self,
         results: list[TaskResult],
         warnings: list[str] | None = None,
+        report: AggregateReport | None = None,
     ) -> str:
         """Merges all task results into a coherent final answer."""
-        self.logger.info("Merging %d results with %d warnings.", len(results), len(warnings or []))
+        warn_count = len(warnings or [])
+        report_summary = ""
+        if report:
+            warn_count = len(report.unresolved_warnings) or warn_count
+            report_summary = (
+                f"\nExecution Report: Total={report.total_tasks}, Passed={report.passed}, "
+                f"Retried-then-passed={report.failed_then_passed}, Force-merged={report.force_merged}, "
+                f"Issues Resolved={report.issues_resolved}/{report.total_issues_found}\n"
+            )
+
+        self.logger.info("Merging %d results with %d warnings.", len(results), warn_count)
 
         formatted_results = []
         for r in results:
@@ -121,17 +149,26 @@ class LeaderAgent(BaseAgent):
             )
         all_results_str = "\n".join(formatted_results)
 
+        active_warnings = warnings or (report.unresolved_warnings if report else [])
         warnings_str = ""
-        if warnings:
-            warnings_str = "\n### Unresolved Warnings / Caveats:\n" + "\n".join(f"- {w}" for w in warnings)
+        if active_warnings:
+            warnings_str = (
+                "\n### ⚠ Unresolved Concerns (from Reviewer audits):\n"
+                + "\n".join(f"- {w}" for w in active_warnings)
+            )
 
         user_message = (
             "Combine the following sub-task outputs into a single, cohesive, unified response.\n"
             "Eliminate redundancy between sub-task outputs, preserve all important details, "
             "and ensure proper flow.\n\n"
+            f"{report_summary}"
             f"{all_results_str}\n"
             f"{warnings_str}\n\n"
-            "Return the final combined response. If warnings exist, include them clearly in a Caveats/Warnings section."
+            "Instructions:\n"
+            "1. Produce a complete, unified answer that addresses the full user intent.\n"
+            "2. If '⚠ Unresolved Concerns' are present above, you MUST include a dedicated "
+            "'## ⚠ Unresolved Concerns' section at the end highlighting these caveats clearly.\n"
+            "3. If no unresolved concerns exist, do not fabricate warnings."
         )
 
         final_answer = await self.llm_client.chat(

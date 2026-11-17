@@ -1,0 +1,32 @@
+[
+  {
+    "id": "code-gen",
+    "prompt": "Build a Python function that validates credit card numbers using the Luhn algorithm. Include error handling, type hints, and unit tests.",
+    "traps": ["empty string input", "non-numeric characters", "single digit edge case"],
+    "expected_triad_advantage": "Reviewer catches missing edge cases"
+  },
+  {
+    "id": "research",
+    "prompt": "Compare the trade-offs between microservices and monolithic architectures for a team of 5 developers building a B2B SaaS product.",
+    "traps": ["unsourced claims", "absolutist statements"],
+    "expected_triad_advantage": "Reviewer flags unsourced claims"
+  },
+  {
+    "id": "logic",
+    "prompt": "A farmer needs to transport a fox, a chicken, and a bag of grain across a river. The boat can carry the farmer and one item. If left alone, the fox eats the chicken and the chicken eats the grain. How does the farmer get everything across?",
+    "traps": ["leaving fox+chicken alone", "leaving chicken+grain alone"],
+    "expected_triad_advantage": "Reviewer validates each step against constraints"
+  },
+  {
+    "id": "mixed",
+    "prompt": "Design a database schema for a social media platform that supports posts, comments, likes, and follower relationships. Write the SQL CREATE TABLE statements and explain the indexing strategy.",
+    "traps": ["missing foreign keys", "no indexes on lookup columns"],
+    "expected_triad_advantage": "Separate implementation and review catches schema issues"
+  },
+  {
+    "id": "hallucination",
+    "prompt": "Explain the Robertson-Walker theorem and its implications for distributed systems consensus.",
+    "traps": ["fabricated theorem — should flag uncertainty"],
+    "expected_triad_advantage": "RAG returns nothing — Reviewer flags as unsupported"
+  }
+]
