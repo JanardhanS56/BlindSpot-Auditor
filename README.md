@@ -80,69 +80,103 @@ Single-agent LLM systems suffer from an inherent **confirmation bias**: when the
 
 ---
 
-## 4. Setup & Installation
+## 4. Setup, Database & Quickstart Guide
 
-### Prerequisites
-- Python 3.10+ (tested on Python 3.14)
-- PostgreSQL with `pgvector` extension (optional; system includes automatic array-fallback for environments without native pgvector)
-- Groq API Key
-- NVIDIA API Key
+Anyone cloning this repository can get the full multi-agent system and database running in under 3 minutes.
 
-### 1. Clone & Install Dependencies
+### What Happens to the Database?
+When you clone this repository, you do **not** need to download or restore a database dump. 
+* The database schema (`document_embeddings` table) is created **automatically** on first startup.
+* The standards corpus is embedded and inserted **automatically** into your database by running the indexing script.
+* You can run PostgreSQL locally or launch a ready-to-go `pgvector` container in one command via Docker.
+
+---
+
+### Step 1: Clone & Install Dependencies
 ```bash
-git clone https://github.com/janardhan-dev/BlindSpot-Auditor.git
+git clone https://github.com/JanardhanS56/BlindSpot-Auditor.git
 cd BlindSpot-Auditor
 pip install -r requirements.txt
 ```
 
-### 2. Configure Environment Variables
-Create a `.env` file in the project root:
+---
+
+### Step 2: Start the Database (Docker or Local)
+
+**Option A: 1-Line Docker Setup (Recommended)**
+```bash
+docker run -d --name blindspot-db -p 5432:5432 -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=postgres ankane/pgvector
+```
+
+**Option B: Existing Local PostgreSQL**
+If you already have PostgreSQL installed on your machine, simply ensure it is running on port `5432` and that the database user credentials match your `.env` configuration. (Native `pgvector` is optional; an automatic array dot-product fallback activates if the C extension is not installed).
+
+---
+
+### Step 3: Configure API Keys & Environment Variables
+Copy the template file:
+```bash
+cp .env.example .env
+```
+Edit `.env` with your API keys:
+1. **Groq API Key**: Free tier available at [console.groq.com](https://console.groq.com/keys).
+2. **NVIDIA API Key**: Free developer credits available at [build.nvidia.com](https://build.nvidia.com/nvidia/nemotron-3_5-embed-8b-bf16).
+3. **Database Credentials**: If using Option A (Docker), the default credentials in `.env.example` (`localhost:5432`, `postgres`/`postgres`) work out of the box.
+
 ```env
-# LLM Provider (Groq)
-GROQ_API_KEY=your_groq_api_key_here
-DEFAULT_MODEL=openai/gpt-oss-120b
-
-# NVIDIA Embeddings API
-NVIDIA_API_KEY=your_nvidia_api_key_here
-
-# PostgreSQL / pgvector
+GROQ_API_KEY=gsk_your_groq_key_here
+NVIDIA_API_KEY=nvapi_your_nvidia_key_here
 POSTGRES_HOST=localhost
 POSTGRES_PORT=5432
 POSTGRES_MAINTAINANCE_DB=postgres
 POSTGRES_USERNAME=postgres
-POSTGRES_PASSWORD=your_postgres_password
-
-# Pipeline & RAG Optimization
-MAX_RETRIES=3
-PIPELINE_TIMEOUT=120.0
-RAG_TOP_K=5
-RAG_MIN_SIMILARITY=0.3
-EMBEDDING_DIM=4096
-EMBEDDING_TRUNCATE=false
-```
-
-### 3. Initialize & Index Knowledge Base
-Populate the vector store with the coding standards corpus:
-```bash
-python -m rag.indexer
+POSTGRES_PASSWORD=postgres
 ```
 
 ---
 
-## 5. Usage
-
-### Running as an MCP Server
-To expose the system to MCP clients (such as Claude Desktop, Antigravity, or Cursor):
+### Step 4: Index the Knowledge Base
+Run the automated indexing pipeline. This creates the PostgreSQL table, reads the 4 standard files in `knowledge_base/`, computes their 4,096-dimensional embeddings via NVIDIA Nemotron, and saves them to the database:
 ```bash
-# Stdio transport (default)
-python mcp_server.py --transport stdio
+python -m rag.indexer
+```
+*Expected output: `Successfully indexed 17 chunks across 4 documents into document_embeddings table.`*
 
-# SSE transport
-python mcp_server.py --transport sse
+---
+
+### Step 5: Test the System Immediately
+
+**Test 1: Quick Command-Line Prompt**
+Verify the multi-agent triad live in your terminal:
+```bash
+python -c "import asyncio; from orchestrator import Orchestrator; asyncio.run(Orchestrator().run('Write a thread-safe singleton in Python with type hints and docstrings'))"
 ```
 
-#### MCP Client Configuration
-Add the server to your `claude_desktop_config.json` or `mcp_settings.json`:
+**Test 2: Full Integration Test**
+Run the automated end-to-end verification suite:
+```bash
+python -m pytest tests/test_integration_final.py -v -s
+```
+
+**Test 3: Benchmark Evaluation Suite**
+Run the 5-prompt evaluation comparing single-agent baseline vs. the AKILI-SPECS triad:
+```bash
+python tests/run_evaluation.py
+```
+
+---
+
+## 5. Connecting to Claude Desktop / Cursor (MCP Mode)
+
+To expose the system as a real-time coding tool to MCP clients (such as Claude Desktop, Cursor, or Antigravity):
+
+```bash
+# Start the MCP server (stdio transport)
+python mcp_server.py --transport stdio
+```
+
+#### Client Configuration
+Add the server to your `claude_desktop_config.json` (or IDE MCP configuration):
 ```json
 {
   "mcpServers": {
