@@ -245,6 +245,7 @@ class Orchestrator:
         final_answer: str = await self.leader.merge(
             passed_results,
             warnings=report.unresolved_warnings,
+            report=report,
         )
         self.execution_log.append({
             "stage": "merge",
